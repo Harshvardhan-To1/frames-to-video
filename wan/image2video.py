@@ -420,35 +420,64 @@ class WanI2V:
             ],
             dim=1,
         ).to(self.device)
-
-        if img_end is not None:
-            zeros_tensor = reference_video_tensor.clone()
+        
+        # Build complete reference tensor with all keyframes
+        y_interp = None
+        if img_end is not None or middle_images is not None:
+            ref_tensor = reference_video_tensor.clone()
+            
+            # Add end frame
             if img_end is not None:
-                zeros_tensor[:, -1, :, :] = (
+                ref_tensor[:, -1, :, :] = (
                     torch.nn.functional.interpolate(
                         img_end[None].cpu(), size=(h, w), mode="bicubic"
-                    )
-                    .transpose(0, 1)
-                    .squeeze(0)
+                    ).transpose(0, 1).squeeze(0)
                 ).squeeze(1)
-
+            
+            # Add middle frames
             if middle_images is not None:
-                for i in range(len(middle_images)):
-                    frame_to_mask = int(middle_images_timestamps[i] * F) // 4 * 4
-                    zeros_tensor[:, frame_to_mask, :, :] = (
+                for i, timestamp in enumerate(middle_images_timestamps):
+                    # Calculate frame index and align to VAE stride
+                    frame_idx = int(timestamp * F)
+                    frame_idx = (frame_idx // self.vae_stride[0]) * self.vae_stride[0]
+                    frame_idx = min(frame_idx, F - 1)  # Clamp to valid range
+                    
+                    ref_tensor[:, frame_idx, :, :] = (
                         torch.nn.functional.interpolate(
                             middle_image_tensors[i][None].cpu(),
                             size=(h, w),
                             mode="bicubic",
-                        )
-                        .transpose(0, 1)
-                        .squeeze(0)
+                        ).transpose(0, 1).squeeze(0)
                     ).squeeze(1)
-            zeros_tensor = zeros_tensor.to(self.device)
-            y_interp = self.vae.encode([zeros_tensor])[0]
-
+            
+            # Encode the reference tensor
+            ref_tensor = ref_tensor.to(self.device)
+            y_interp = self.vae.encode([ref_tensor])[0]
+        
+        # Create mask in latent space
+        if img is not None:
+            vae_F = (F - 1) // self.vae_stride[0] + 1
+            msk = torch.zeros(1, vae_F, lat_h, lat_w, device=self.device)
+            
+            # Mark provided frames
+            msk[:, 0] = 1  # Start frame
+            
+            if img_end is not None:
+                msk[:, -1] = 1
+            
+            if middle_images is not None:
+                for timestamp in middle_images_timestamps:
+                    frame_idx = int(timestamp * F)
+                    latent_idx = frame_idx // self.vae_stride[0]
+                    latent_idx = min(latent_idx, vae_F - 1)
+                    msk[:, latent_idx] = 1
+            
+            # Reshape: [1, vae_F, lat_h, lat_w] -> [1, vae_F, 1, lat_h, lat_w] -> [1, 1, vae_F, lat_h, lat_w]
+            msk = msk.view(1, vae_F, 1, lat_h, lat_w).transpose(1, 2)[0]
+        
+        # Concatenate mask with encoded frames
         if y_interp is not None:
-            y_interp = torch.concat([msk, y_interp])
+            y_interp = torch.cat([msk, y_interp], dim=0)
         
         @contextmanager
         def noop_no_sync():
