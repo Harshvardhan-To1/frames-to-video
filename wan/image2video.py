@@ -369,22 +369,30 @@ class WanI2V:
             device=self.device)
 
         if img is not None:
+            # Create mask in video frame space
             msk = torch.zeros(1, F, lat_h, lat_w, device=self.device)
             msk[:, 0] = 1  # Set first frame to 1
-
+        
             if img_end is not None:
                 msk[:, -1] = 1
+            
             if middle_images is not None:
                 for i in range(len(middle_images)):
-                    frame_to_mask = int(middle_images_timestamps[i] * F) // 4 * 4
+                    frame_to_mask = int(middle_images_timestamps[i] * F)
+                    # Align to nearest valid frame considering VAE stride
+                    frame_to_mask = (frame_to_mask // self.vae_stride[0]) * self.vae_stride[0]
                     msk[:, frame_to_mask] = 1
-
-            msk = torch.concat(
-                [torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]],
-                dim=1,
-            )
-            msk = msk.view(1, msk.shape[1] // 4, 4, lat_h, lat_w)
-            msk = msk.transpose(1, 2)[0]
+        
+            # Convert mask to latent space (accounting for temporal VAE compression)
+            vae_F = (F - 1) // self.vae_stride[0] + 1
+            msk_latent = torch.zeros(1, vae_F, lat_h, lat_w, device=self.device)
+            
+            for frame_idx in range(F):
+                latent_idx = frame_idx // self.vae_stride[0]
+                if msk[0, frame_idx].max() > 0:
+                    msk_latent[0, latent_idx] = 1
+            
+            msk = msk_latent.view(1, vae_F, 1, lat_h, lat_w).transpose(1, 2)[0]
 
         if n_prompt == "":
             n_prompt = self.sample_neg_prompt
